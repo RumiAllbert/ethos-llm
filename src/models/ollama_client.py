@@ -1,6 +1,7 @@
 """Ollama client for interacting with local LLM models."""
 
 import logging
+import random
 import time
 from typing import Any
 
@@ -74,6 +75,46 @@ class OllamaClient:
             else:
                 raise
 
+    def query_with_retry(
+        self, model: str, messages: list[dict[str, str]], max_retries: int = 3
+    ) -> dict[str, Any]:
+        """Query a model with retry logic for robustness.
+
+        Args:
+            model: Name of the model to query
+            messages: List of message dictionaries
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            Response dictionary from Ollama
+        """
+        retries = 0
+        backoff = 1  # Initial backoff in seconds
+
+        while retries < max_retries:
+            try:
+                response = ollama.chat(
+                    model=model, messages=messages, options={"timeout": self.timeout}
+                )
+                return response
+            except Exception as e:
+                retries += 1
+                if retries >= max_retries:
+                    logger.error(f"Failed to query {model} after {max_retries} attempts: {e}")
+                    raise
+
+                # Exponential backoff with jitter
+                jitter = random.uniform(0, 0.1 * backoff)
+                sleep_time = backoff + jitter
+                logger.warning(
+                    f"Error querying {model} (attempt {retries}/{max_retries}): {e}. Retrying in {sleep_time:.1f}s"
+                )
+                time.sleep(sleep_time)
+                backoff *= 2  # Exponential backoff
+
+        # Should never reach here but just in case
+        raise RuntimeError(f"Failed to query {model} after {max_retries} attempts")
+
     def query_baseline(self, model: str, scenario: str) -> tuple[str, bool]:
         """Query a model with a scenario to get a baseline response.
 
@@ -89,9 +130,7 @@ class OllamaClient:
 
         try:
             logger.info(f"Querying {model} for baseline response")
-            response = ollama.chat(
-                model=model, messages=messages, options={"timeout": self.timeout}
-            )
+            response = self.query_with_retry(model, messages)
             response_text = response["message"]["content"]
 
             # Check for censorship
@@ -106,7 +145,7 @@ class OllamaClient:
     def query_framework(
         self, model: str, scenario: str, baseline_response: str, framework: str
     ) -> tuple[str, bool]:
-        """Query a model with a scenario and ethical framework.
+        """Query a model with a scenario and ethical framework with enhanced prompting.
 
         Args:
             model: Name of the model to query
@@ -117,22 +156,58 @@ class OllamaClient:
         Returns:
             Tuple of (response text, censorship flag)
         """
-        baseline_prompt = f"Consider the following ethical scenario and provide your reasoning and recommendation:\n\n{scenario}"
+        # Define framework-specific context to improve understanding
+        framework_context = {
+            "utilitarian": (
+                "Utilitarianism evaluates actions based on their consequences, "
+                "specifically how much happiness or utility they produce. "
+                "The right action maximizes overall well-being across all affected individuals. "
+                "As a utilitarian ethical reasoner, consider the consequences of each action "
+                "and which option produces the greatest good for the greatest number."
+            ),
+            "deontological": (
+                "Deontological ethics focuses on duties, rules, and obligations rather than consequences. "
+                "Actions are right if they adhere to moral rules and duties, regardless of their outcomes. "
+                "As a deontological ethical reasoner, consider what universal rules or maxims should guide "
+                "action in this situation, and what duties or obligations are relevant."
+            ),
+            "virtue_ethics": (
+                "Virtue ethics emphasizes developing excellent character traits (virtues) "
+                "rather than following rules or maximizing consequences. "
+                "The right action is what a virtuous person would do in the situation. "
+                "As a virtue ethics reasoner, consider what virtues are relevant "
+                "(e.g., courage, honesty, compassion) and how they apply."
+            ),
+        }
+
+        # Get the appropriate context and prompt
+        context = framework_context.get(framework, "")
+
+        # Base prompt for all frameworks
         framework_prompt = self.frameworks.get(
             framework, f"Re-evaluate your response from a {framework} perspective."
         )
 
+        # Enhanced prompt with context
+        enhanced_prompt = (
+            f"{context}\n\n"
+            f"{framework_prompt}\n\n"
+            f"Be explicit about how this framework changes (or doesn't change) your reasoning and recommendation. "
+            f"Clearly articulate the ethical principles that guide your analysis under this framework."
+        )
+
+        # Construct messages
+        baseline_prompt = f"Consider the following ethical scenario and provide your reasoning and recommendation:\n\n{scenario}"
+
         messages = [
             {"role": "user", "content": baseline_prompt},
             {"role": "assistant", "content": baseline_response},
-            {"role": "user", "content": framework_prompt},
+            {"role": "user", "content": enhanced_prompt},
         ]
 
         try:
             logger.info(f"Querying {model} with {framework} framework")
-            response = ollama.chat(
-                model=model, messages=messages, options={"timeout": self.timeout}
-            )
+            response = self.query_with_retry(model, messages)
             response_text = response["message"]["content"]
 
             # Check for censorship

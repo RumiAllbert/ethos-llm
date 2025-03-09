@@ -1,6 +1,8 @@
 """Dataset loading and processing module."""
 
 import logging
+import random
+import re
 from typing import Any
 
 import pandas as pd
@@ -190,6 +192,164 @@ class DatasetLoader:
         df = pd.DataFrame(data)
         df.to_csv(filepath, index=False)
         logger.info(f"Exported {len(df)} scenarios to {filepath}")
+
+    def stratified_sample(self, max_samples: int | None = None) -> list[ScenarioItem]:
+        """Get a stratified sample of scenarios to ensure diversity.
+
+        Args:
+            max_samples: Maximum number of samples to return
+
+        Returns:
+            List of scenario items with balanced representation
+        """
+        all_scenarios = self.get_all_scenarios()
+
+        # Group by source
+        scenarios_by_source = {}
+        for scenario in all_scenarios:
+            if scenario.source not in scenarios_by_source:
+                scenarios_by_source[scenario.source] = []
+            scenarios_by_source[scenario.source].append(scenario)
+
+        # Calculate samples per source
+        if max_samples:
+            samples_per_source = max(1, max_samples // len(scenarios_by_source))
+            result = []
+
+            # Take balanced samples from each source
+            for source, scenarios in scenarios_by_source.items():
+                # Random sample without replacement
+                source_samples = random.sample(scenarios, min(samples_per_source, len(scenarios)))
+                result.extend(source_samples)
+
+            # If we need more samples to reach max_samples
+            if len(result) < max_samples:
+                # Get remaining scenarios not already sampled
+                remaining = [s for s in all_scenarios if s not in result]
+                # Add random samples until we reach max_samples or run out
+                additional = random.sample(
+                    remaining, min(max_samples - len(result), len(remaining))
+                )
+                result.extend(additional)
+
+            return result
+
+        return all_scenarios
+
+    def analyze_scenario_complexity(self, scenario: ScenarioItem) -> dict[str, Any]:
+        """Analyze the complexity of an ethical scenario.
+
+        Args:
+            scenario: The scenario to analyze
+
+        Returns:
+            Dictionary with complexity metrics
+        """
+        text = scenario.text
+
+        # Word count
+        word_count = len(text.split())
+
+        # Sentence count
+        sentence_count = len(re.split(r"[.!?]+", text))
+
+        # Average words per sentence
+        avg_words_per_sentence = word_count / max(1, sentence_count)
+
+        # Count ethical dilemma indicators
+        dilemma_terms = [
+            "should",
+            "must",
+            "ought",
+            "right",
+            "wrong",
+            "good",
+            "bad",
+            "ethical",
+            "moral",
+            "dilemma",
+            "choice",
+            "decide",
+            "obligation",
+        ]
+        dilemma_score = sum(term in text.lower() for term in dilemma_terms)
+
+        # Determine complexity category
+        if word_count < 50:
+            complexity = "simple"
+        elif word_count < 100:
+            complexity = "moderate"
+        else:
+            complexity = "complex"
+
+        # Check for presence of multiple stakeholders
+        stakeholder_markers = ["person", "people", "they", "he", "she", "individual", "group"]
+        stakeholders_present = sum(marker in text.lower() for marker in stakeholder_markers)
+
+        return {
+            "word_count": word_count,
+            "sentence_count": sentence_count,
+            "avg_words_per_sentence": avg_words_per_sentence,
+            "dilemma_score": dilemma_score,
+            "complexity": complexity,
+            "stakeholders_present": stakeholders_present
+            > 2,  # Boolean indicating multiple stakeholders
+        }
+
+    def tag_scenarios(self, scenarios: list[ScenarioItem]) -> list[ScenarioItem]:
+        """Tag scenarios with demographic and ethical theme information.
+
+        Args:
+            scenarios: List of scenarios to tag
+
+        Returns:
+            Tagged scenarios
+        """
+        # Demographic identifiers
+        demographics = {
+            "gender": ["man", "woman", "boy", "girl", "male", "female", "he", "she"],
+            "age": ["child", "young", "old", "elderly", "senior", "teen", "adult"],
+            "family": ["parent", "mother", "father", "son", "daughter", "family", "sibling"],
+        }
+
+        # Ethical themes
+        themes = {
+            "harm": ["harm", "hurt", "damage", "injury", "pain"],
+            "fairness": ["fair", "unfair", "equal", "unequal", "justice", "injustice"],
+            "loyalty": ["loyal", "disloyal", "betray", "faithful", "allegiance"],
+            "authority": ["authority", "obey", "respect", "tradition", "honor"],
+            "purity": ["pure", "impure", "disgusting", "sanctity", "sacred", "clean", "dirty"],
+        }
+
+        for scenario in scenarios:
+            # Initialize tags
+            demographic_tags = {}
+            theme_tags = {}
+
+            text = scenario.text.lower()
+
+            # Check for demographic mentions
+            for demo_category, demo_terms in demographics.items():
+                demo_mentions = sum(1 for term in demo_terms if term in text)
+                if demo_mentions > 0:
+                    demographic_tags[demo_category] = True
+
+            # Check for ethical themes
+            for theme_name, theme_terms in themes.items():
+                theme_mentions = sum(1 for term in theme_terms if term in text)
+                if theme_mentions > 0:
+                    theme_tags[theme_name] = theme_mentions
+
+            # Add tags to metadata
+            scenario.metadata["demographics"] = demographic_tags
+            scenario.metadata["ethical_themes"] = theme_tags
+
+            # Determine primary ethical theme (if any)
+            if theme_tags:
+                primary_theme = max(theme_tags.items(), key=lambda x: x[1])[0]
+                scenario.metadata["primary_theme"] = primary_theme
+
+        return scenarios
 
 
 if __name__ == "__main__":

@@ -15,6 +15,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
+from src.analysis.visualization import (
+    create_metrics_dashboard,
+    plot_censorship_analysis,
+    plot_comparative_fluctuation,
+    plot_response_trajectories,
+    plot_statistical_significance,
+)
 from src.utils.logging import get_experiment_logger, setup_logging
 
 
@@ -262,8 +269,26 @@ def main(args: argparse.Namespace) -> None:
     # Load results
     config, df = load_results(results_dir)
 
-    # Generate visualizations
+    # Generate existing visualizations
     generate_visualizations(df, config, output_dir)
+
+    # Generate enhanced visualizations
+    plots_dir = Path(output_dir) / "plots"
+
+    # Create comprehensive dashboard
+    create_metrics_dashboard(df, str(plots_dir))
+
+    # Create statistical significance visualizations
+    plot_statistical_significance(df, str(plots_dir))
+
+    # Create response trajectory visualization
+    plot_response_trajectories(df, str(plots_dir))
+
+    # Create comparative fluctuation analysis
+    plot_comparative_fluctuation(df, str(plots_dir))
+
+    # Create censorship analysis visualization
+    plot_censorship_analysis(df, str(plots_dir))
 
     logger.info("Analysis completed successfully!")
 

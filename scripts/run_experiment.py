@@ -8,15 +8,25 @@ experiment with the specified ethical frameworks.
 import argparse
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from src.analysis.metrics import ResponseAnalyzer
-from src.data.dataset import DatasetLoader
+from src.data.dataset import DatasetLoader, ScenarioItem
 from src.models.ollama_client import OllamaClient
 from src.utils.config import load_config, setup_experiment_dirs
+from src.utils.dashboard import (
+    create_progress_dashboard,
+    load_checkpoint,
+    should_skip_combination,
+    update_progress,
+)
 from src.utils.logging import get_experiment_logger, setup_logging
+
+# Get logger for this module
+logger = get_experiment_logger("experiment")
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,8 +58,59 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir", "-o", type=str, help="Directory to save results (overrides config)"
     )
+    parser.add_argument("--resume", action="store_true", help="Resume from checkpoint if available")
+    parser.add_argument(
+        "--parallel", type=int, default=1, help="Number of parallel workers (default: 1)"
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     return parser.parse_args()
+
+
+def process_scenario_parallel(
+    scenario: ScenarioItem,
+    model: str,
+    frameworks: list[str],
+    client: OllamaClient,
+    save_dir: Path,
+    completed_combinations: set[str],
+    dashboard: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Process a scenario with a model and frameworks (for parallel execution).
+
+    Args:
+        scenario: The scenario to process
+        model: The model to use
+        frameworks: List of frameworks to test
+        client: OllamaClient instance
+        save_dir: Directory to save results
+        completed_combinations: Set of already completed combinations
+        dashboard: Optional dashboard for tracking progress
+
+    Returns:
+        Result dictionary or None if skipped/error
+    """
+    # Check if this combination has already been processed
+    if should_skip_combination(scenario.id, model, completed_combinations):
+        logger.info(f"Skipping already processed scenario {scenario.id} with model {model}")
+        return None
+
+    try:
+        # Process the scenario
+        result = client.process_scenario(scenario, model, frameworks)
+
+        # Save raw response data
+        response_path = save_dir / "raw_responses" / f"{scenario.id}_{model}.json"
+        with open(response_path, "w") as f:
+            json.dump(result, f, indent=2)
+
+        # Update progress if dashboard is provided
+        if dashboard is not None:
+            update_progress(dashboard, scenario.id, model, save_dir)
+
+        return result
+    except Exception as e:
+        logger.error(f"Error processing scenario {scenario.id} with model {model}: {e}")
+        return None
 
 
 def run_experiment(
@@ -64,7 +125,6 @@ def run_experiment(
     Returns:
         Dictionary with experiment results
     """
-    logger = get_experiment_logger("experiment")
     logger.info("Starting LLM Ethics Experiment")
 
     # Apply command line overrides
@@ -85,7 +145,8 @@ def run_experiment(
 
     # Setup experiment directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    config["experiment"]["run_id"] = timestamp
+    if "run_id" not in config["experiment"]:
+        config["experiment"]["run_id"] = timestamp
     save_dir = Path(config["experiment"]["save_dir"])
     setup_experiment_dirs(config)
 
@@ -123,35 +184,144 @@ def run_experiment(
 
     # Process scenarios
     all_scenarios = dataset_loader.get_all_scenarios()
-    results = []
 
+    # Check for checkpoint if resuming
+    completed_combinations = set()
+    if args and args.resume:
+        completed_combinations, has_checkpoint = load_checkpoint(save_dir)
+        if has_checkpoint:
+            logger.info(
+                f"Resuming experiment with {len(completed_combinations)} already processed combinations"
+            )
+        else:
+            logger.info("No checkpoint found. Starting fresh experiment.")
+
+    # Create progress dashboard
+    dashboard = create_progress_dashboard(
+        total_scenarios=len(all_scenarios), models=models, frameworks=frameworks, save_dir=save_dir
+    )
+
+    # Update dashboard with completed combinations from checkpoint
+    if completed_combinations:
+        dashboard["completed_combinations"] = list(completed_combinations)
+        dashboard["completed"] = len(completed_combinations)
+
+        # Update models progress
+        for combo in completed_combinations:
+            if "_" in combo:
+                _, model = combo.split("_", 1)
+                if model in dashboard["models_progress"]:
+                    dashboard["models_progress"][model] += 1
+
+    # Start processing
+    results = []
     logger.info(
         f"Processing {len(all_scenarios)} scenarios with {len(models)} models and {len(frameworks)} frameworks"
     )
-    scenario_count = 0
 
-    for scenario in all_scenarios:
-        scenario_count += 1
-        logger.info(f"Processing scenario {scenario_count}/{len(all_scenarios)}: {scenario.id}")
+    # Determine parallel execution mode
+    num_workers = 1
+    if args and args.parallel and args.parallel > 1:
+        num_workers = min(args.parallel, 8)  # Cap at 8 to avoid overwhelming the system
+        logger.info(f"Using {num_workers} parallel workers for processing")
 
-        # Process each model
-        for model in models:
-            logger.info(f"  Using model: {model}")
+    if num_workers > 1:
+        # Parallel execution
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all tasks
+            futures = []
+            for scenario in all_scenarios:
+                for model in models:
+                    # Skip already completed combinations
+                    if should_skip_combination(scenario.id, model, completed_combinations):
+                        logger.debug(
+                            f"Skipping already processed scenario {scenario.id} with model {model}"
+                        )
+                        continue
 
-            # Process scenario with all frameworks
-            try:
-                result = client.process_scenario(scenario, model, frameworks)
-                results.append(result)
+                    futures.append(
+                        executor.submit(
+                            process_scenario_parallel,
+                            scenario,
+                            model,
+                            frameworks,
+                            client,
+                            save_dir,
+                            completed_combinations,
+                            dashboard,
+                        )
+                    )
 
-                # Save raw response data
-                response_path = save_dir / "raw_responses" / f"{scenario.id}_{model}.json"
-                with open(response_path, "w") as f:
-                    json.dump(result, f, indent=2)
+            # Process results as they complete
+            for future in futures:
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                except Exception as e:
+                    logger.error(f"Error in parallel execution: {e}")
+    else:
+        # Sequential execution
+        scenario_count = 0
+        for scenario in all_scenarios:
+            scenario_count += 1
+            logger.info(f"Processing scenario {scenario_count}/{len(all_scenarios)}: {scenario.id}")
 
-            except Exception as e:
-                logger.error(f"Error processing scenario {scenario.id} with model {model}: {e}")
+            # Process each model
+            for model in models:
+                # Skip if already processed
+                if should_skip_combination(scenario.id, model, completed_combinations):
+                    logger.info(
+                        f"Skipping already processed scenario {scenario.id} with model {model}"
+                    )
+                    continue
+
+                logger.info(f"  Using model: {model}")
+
+                # Process scenario with all frameworks
+                try:
+                    result = client.process_scenario(scenario, model, frameworks)
+                    results.append(result)
+
+                    # Save raw response data
+                    response_path = save_dir / "raw_responses" / f"{scenario.id}_{model}.json"
+                    with open(response_path, "w") as f:
+                        json.dump(result, f, indent=2)
+
+                    # Update progress dashboard
+                    update_progress(dashboard, scenario.id, model, save_dir)
+
+                except Exception as e:
+                    logger.error(f"Error processing scenario {scenario.id} with model {model}: {e}")
 
     logger.info(f"Completed processing {len(results)} scenario-model combinations")
+
+    # Handle case where we only processed part of the data due to resuming
+    # We need to load any already processed results that weren't re-processed
+    if completed_combinations:
+        logger.info("Loading previously processed results from files")
+        for combination in completed_combinations:
+            if "_" in combination:
+                scenario_id, model = combination.split("_", 1)
+
+                # Skip if we already have this result in memory
+                if any(
+                    r.get("scenario_id") == scenario_id and r.get("model") == model for r in results
+                ):
+                    continue
+
+                # Load from file
+                response_path = save_dir / "raw_responses" / f"{scenario_id}_{model}.json"
+                if response_path.exists():
+                    try:
+                        with open(response_path) as f:
+                            result = json.load(f)
+                        results.append(result)
+                        logger.debug(f"Loaded previous result for {scenario_id} with {model}")
+                    except Exception as e:
+                        logger.error(
+                            f"Error loading previous result for {scenario_id} with {model}: {e}"
+                        )
 
     # Analyze results
     logger.info("Analyzing results")

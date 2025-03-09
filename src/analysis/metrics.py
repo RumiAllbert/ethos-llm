@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 import pandas as pd
+from scipy import stats
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -257,6 +258,130 @@ class ResponseAnalyzer:
             summary.append("")
 
         return "\n".join(summary)
+
+    def assess_response_quality(self, response: str) -> dict[str, float]:
+        """Assess response quality across multiple dimensions.
+
+        Args:
+            response: The model's response text
+
+        Returns:
+            Dictionary of quality metrics
+        """
+        # Calculate response length (normalized)
+        length = min(1.0, len(response) / 500)  # Normalize, cap at 1.0
+
+        # Calculate lexical diversity
+        words = response.lower().split()
+        unique_words = set(words)
+        lexical_diversity = len(unique_words) / len(words) if words else 0
+
+        # Detect reasoning markers
+        reasoning_markers = [
+            "because",
+            "therefore",
+            "thus",
+            "since",
+            "as a result",
+            "first",
+            "second",
+            "third",
+            "finally",
+            "consequently",
+            "if",
+            "then",
+            "otherwise",
+            "alternatively",
+        ]
+        reasoning_score = sum(marker in response.lower() for marker in reasoning_markers) / len(
+            reasoning_markers
+        )
+
+        # Detect ethical terminology frequency
+        ethical_terms = [
+            "moral",
+            "ethical",
+            "right",
+            "wrong",
+            "good",
+            "bad",
+            "virtue",
+            "duty",
+            "obligation",
+            "principle",
+            "value",
+            "harm",
+            "benefit",
+            "utility",
+            "happiness",
+            "wellbeing",
+            "justice",
+            "fairness",
+        ]
+        ethical_term_score = sum(term in response.lower() for term in ethical_terms) / len(
+            ethical_terms
+        )
+
+        return {
+            "length": length,
+            "lexical_diversity": lexical_diversity,
+            "reasoning_score": reasoning_score,
+            "ethical_term_score": ethical_term_score,
+            "composite_quality": (length + lexical_diversity + reasoning_score + ethical_term_score)
+            / 4,
+        }
+
+    def compare_models(self, df: pd.DataFrame) -> dict[str, Any]:
+        """Perform detailed comparison between models.
+
+        Args:
+            df: DataFrame with experiment results
+
+        Returns:
+            Dictionary with comparative metrics
+        """
+        models = df["model"].unique()
+        if len(models) < 2:
+            return {"error": "Need at least 2 models for comparison"}
+
+        # Prepare framework-only data
+        framework_df = df[df["framework"] != "baseline"]
+
+        # Calculate metrics by model
+        model_metrics = {}
+        for model in models:
+            model_df = framework_df[framework_df["model"] == model]
+            model_metrics[model] = {
+                "fluctuation_rate": model_df["stance_changed"].mean(),
+                "censorship_rate": model_df["censored"].mean(),
+                "avg_similarity": model_df["similarity_to_baseline"].mean(),
+            }
+
+        # Calculate differences
+        comparisons = {}
+        for i, model1 in enumerate(models):
+            for model2 in models[i + 1 :]:
+                key = f"{model1}_vs_{model2}"
+                comparisons[key] = {
+                    "fluctuation_diff": model_metrics[model1]["fluctuation_rate"]
+                    - model_metrics[model2]["fluctuation_rate"],
+                    "censorship_diff": model_metrics[model1]["censorship_rate"]
+                    - model_metrics[model2]["censorship_rate"],
+                    "similarity_diff": model_metrics[model1]["avg_similarity"]
+                    - model_metrics[model2]["avg_similarity"],
+                }
+
+                # Calculate p-values
+                for metric in ["stance_changed", "censored", "similarity_to_baseline"]:
+                    model1_values = framework_df[framework_df["model"] == model1][metric]
+                    model2_values = framework_df[framework_df["model"] == model2][metric]
+
+                    # Perform t-test
+                    t_stat, p_value = stats.ttest_ind(model1_values, model2_values, equal_var=False)
+                    comparisons[key][f"{metric}_p_value"] = p_value
+                    comparisons[key][f"{metric}_significant"] = p_value < 0.05
+
+        return {"model_metrics": model_metrics, "comparisons": comparisons}
 
 
 if __name__ == "__main__":
