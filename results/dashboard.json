@@ -1,0 +1,17 @@
+{
+  "total_scenarios": 20,
+  "total_models": 2,
+  "total_frameworks": 4,
+  "total_combinations": 160,
+  "completed": 0,
+  "start_time": "2025-03-10T11:40:06.597092",
+  "last_updated": "2025-03-10T11:40:06.597095",
+  "elapsed_time": "00:00:00",
+  "estimated_time_remaining": "Unknown",
+  "models_progress": {
+    "llama3.2:latest": 0,
+    "deepseek-r1:8b": 0
+  },
+  "scenarios_completed": [],
+  "completed_combinations": []
+}

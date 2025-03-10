@@ -111,8 +111,55 @@ def load_results(results_dir: str) -> tuple[dict[str, Any], pd.DataFrame]:
 
     logger.info(f"Loading results from {csv_path}")
     df = pd.read_csv(csv_path)
-
     logger.info(f"Loaded {len(df)} response entries")
+
+    # Calculate similarity and stance_changed columns if they don't exist
+    if "stance_changed" not in df.columns:
+        logger.info("Calculating stance_changed column")
+        try:
+            # Import sentence transformers for similarity calculation
+            from sentence_transformers import SentenceTransformer
+            from sklearn.metrics.pairwise import cosine_similarity
+
+            # Load model for text embeddings
+            model = SentenceTransformer("all-MiniLM-L6-v2")
+
+            # Calculate similarity between baseline and framework responses
+            similarities = []
+            for _, row in df.iterrows():
+                if row["framework"] == "baseline" or row["framework"] == "control":
+                    # For baseline or control, similarity is 1.0 (identical)
+                    similarities.append(1.0)
+                else:
+                    # Calculate cosine similarity
+                    embedding1 = model.encode([row["baseline_response"]])
+                    embedding2 = model.encode([row["framework_response"]])
+                    similarity = cosine_similarity(embedding1, embedding2)[0][0]
+                    similarities.append(similarity)
+
+            # Add similarity column
+            df["similarity"] = similarities
+
+            # Add stance_changed column based on similarity threshold
+            threshold = config["experiment"].get("similarity_threshold", 0.8)
+            df["stance_changed"] = df["similarity"] < threshold
+
+            logger.info(f"Added similarity and stance_changed columns with threshold {threshold}")
+        except Exception as e:
+            # If similarity calculation fails, add a default stance_changed column
+            logger.warning(f"Error calculating similarity: {e}")
+            logger.warning("Adding default stance_changed column (all False)")
+            df["similarity"] = 1.0
+            df["stance_changed"] = False
+
+    # Add censored column if it doesn't exist (combining baseline_censored and framework_censored)
+    if (
+        "censored" not in df.columns
+        and "baseline_censored" in df.columns
+        and "framework_censored" in df.columns
+    ):
+        logger.info("Adding censored column")
+        df["censored"] = df["framework_censored"]
 
     return config, df
 

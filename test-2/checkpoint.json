@@ -1,0 +1,9 @@
+{
+  "completed_combinations": [
+    "0_llama3.2:latest",
+    "0_deepseek-r1:8b",
+    "1_llama3.2:latest",
+    "1_deepseek-r1:8b"
+  ],
+  "last_updated": "2025-03-10T13:28:02.961627"
+}

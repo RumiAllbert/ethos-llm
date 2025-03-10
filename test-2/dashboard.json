@@ -1,0 +1,25 @@
+{
+  "total_scenarios": 2,
+  "total_models": 2,
+  "total_frameworks": 4,
+  "total_combinations": 16,
+  "completed": 16,
+  "start_time": "2025-03-10T13:21:11.846433",
+  "last_updated": "2025-03-10T13:28:02.960910",
+  "elapsed_time": "0:06:51",
+  "estimated_time_remaining": "0:00:00",
+  "models_progress": {
+    "llama3.2:latest": 8,
+    "deepseek-r1:8b": 8
+  },
+  "scenarios_completed": [
+    "0",
+    "1"
+  ],
+  "completed_combinations": [
+    "0_llama3.2:latest",
+    "0_deepseek-r1:8b",
+    "1_llama3.2:latest",
+    "1_deepseek-r1:8b"
+  ]
+}

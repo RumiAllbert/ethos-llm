@@ -2,7 +2,6 @@
 Enhanced analysis module for the LLM Ethics experiment with focus on daily dilemmas.
 """
 
-from collections import defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -48,54 +47,45 @@ class DilemmaAnalyzer:
 
         for value in values:
             value_embedding = self.get_text_embedding(str(value))
-            alignment_scores[value] = float(
+            similarity = float(
                 self._cosine_similarity([response_embedding], [value_embedding])[0][0]
             )
+            alignment_scores[value] = similarity
 
         return alignment_scores
 
-    def calculate_enhanced_metrics(self, results_df: pd.DataFrame) -> dict[str, dict]:
+    def calculate_stance_changes(
+        self, results_df: pd.DataFrame, threshold: float = 0.8
+    ) -> pd.DataFrame:
         """
-        Calculate enhanced metrics using the rich daily dilemmas dataset structure.
+        Calculate whether stance changed between baseline and framework responses.
 
         Args:
             results_df: DataFrame containing experiment results
+            threshold: Similarity threshold below which we consider stance changed
 
         Returns:
-            Dictionary of enhanced metrics
+            DataFrame with stance_changed column added
         """
-        metrics = {
-            "value_based_metrics": defaultdict(dict),
-            "topic_based_metrics": defaultdict(dict),
-            "action_type_metrics": defaultdict(dict),
-        }
+        # Create a copy to avoid modifying the original
+        df = results_df.copy()
 
-        # Value-based metrics
-        for value in results_df["values"].explode().unique():
-            value_responses = results_df[results_df["values"].apply(lambda x: value in x)]
-            metrics["value_based_metrics"]["alignment_scores"][value] = value_responses[
-                "value_alignment"
-            ].mean()
-            metrics["value_based_metrics"]["framework_effectiveness"][value] = value_responses[
-                "stance_changed"
-            ].mean()
+        # Calculate stance changes
+        for idx, row in df.iterrows():
+            try:
+                baseline_embedding = self.get_text_embedding(str(row["baseline_response"]))
+                framework_embedding = self.get_text_embedding(str(row["framework_response"]))
+                similarity = float(
+                    self._cosine_similarity([baseline_embedding], [framework_embedding])[0][0]
+                )
+                df.at[idx, "stance_changed"] = similarity < threshold
+                df.at[idx, "similarity_score"] = similarity
+            except Exception as e:
+                print(f"Error calculating stance change for row {idx}: {e}")
+                df.at[idx, "stance_changed"] = False
+                df.at[idx, "similarity_score"] = 0.0
 
-        # Topic-based metrics
-        for topic in results_df["topic"].unique():
-            topic_responses = results_df[results_df["topic"] == topic]
-            metrics["topic_based_metrics"]["fluctuation"][topic] = topic_responses[
-                "stance_changed"
-            ].mean()
-            metrics["topic_based_metrics"]["censorship"][topic] = topic_responses["censored"].mean()
-
-        # Action-type metrics
-        for action_type in results_df["action_type"].unique():
-            action_responses = results_df[results_df["action_type"] == action_type]
-            metrics["action_type_metrics"]["framework_preference"][action_type] = (
-                action_responses.groupby("framework")["stance_changed"].mean().to_dict()
-            )
-
-        return metrics
+        return df
 
     def create_enhanced_visualizations(self, results_df: pd.DataFrame):
         """
@@ -104,105 +94,180 @@ class DilemmaAnalyzer:
         Args:
             results_df: DataFrame containing experiment results
         """
-        # 1. Value Alignment Analysis
-        plt.figure(figsize=(15, 8))
-        value_effectiveness = pd.DataFrame(results_df.groupby("values")["value_alignment"].mean())
-        sns.barplot(data=value_effectiveness.reset_index(), x="values", y="value_alignment")
-        plt.title("Value Alignment Scores by Ethical Value")
+        # Make sure we have the necessary columns
+        if len(results_df) == 0:
+            print("No results to visualize")
+            return
+
+        # Calculate stance changes if not already present
+        if "stance_changed" not in results_df.columns:
+            results_df = self.calculate_stance_changes(results_df)
+
+        # Create basic visualizations that don't depend on specific metadata
+
+        # 1. Framework Effectiveness by Model
+        plt.figure(figsize=(10, 6))
+        framework_model_data = (
+            results_df.groupby(["model", "framework"])["similarity_score"].mean().reset_index()
+        )
+        sns.barplot(data=framework_model_data, x="framework", y="similarity_score", hue="model")
+        plt.title("Framework Impact by Model (Higher = Less Change)")
         plt.xticks(rotation=45)
         plt.tight_layout()
-        plt.savefig(self.save_dir / "value_alignment.png")
+        plt.savefig(self.save_dir / "framework_model_impact.png")
         plt.close()
 
-        # 2. Topic Response Patterns
-        plt.figure(figsize=(12, 8))
-        topic_patterns = pd.pivot_table(
-            results_df, values="stance_changed", index="topic", columns="framework", aggfunc="mean"
-        )
-        sns.heatmap(topic_patterns, annot=True, cmap="YlOrRd", fmt=".2f")
-        plt.title("Framework Effectiveness by Topic")
-        plt.tight_layout()
-        plt.savefig(self.save_dir / "topic_framework_patterns.png")
-        plt.close()
+        # 2. Censorship Analysis
+        if "framework_censored" in results_df.columns:
+            plt.figure(figsize=(10, 6))
+            censorship_data = (
+                results_df.groupby(["model", "framework"])["framework_censored"]
+                .mean()
+                .reset_index()
+            )
+            sns.barplot(data=censorship_data, x="framework", y="framework_censored", hue="model")
+            plt.title("Censorship Rate by Framework and Model")
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.savefig(self.save_dir / "censorship_analysis.png")
+            plt.close()
 
-        # 3. Action Type Analysis
-        plt.figure(figsize=(12, 6))
-        action_framework_patterns = pd.pivot_table(
-            results_df,
-            values="stance_changed",
-            index="action_type",
-            columns="framework",
-            aggfunc="mean",
+        # 3. Response Length Analysis
+        results_df["baseline_length"] = results_df["baseline_response"].apply(lambda x: len(str(x)))
+        results_df["framework_length"] = results_df["framework_response"].apply(
+            lambda x: len(str(x))
         )
-        sns.boxplot(data=results_df, x="action_type", y="stance_changed", hue="framework")
-        plt.title("Framework Effectiveness by Action Type")
+        results_df["length_ratio"] = results_df["framework_length"] / results_df["baseline_length"]
+
+        plt.figure(figsize=(10, 6))
+        length_data = results_df.groupby("framework")["length_ratio"].mean().reset_index()
+        sns.barplot(data=length_data, x="framework", y="length_ratio")
+        plt.title("Response Length Ratio by Framework (Framework/Baseline)")
         plt.xticks(rotation=45)
+        plt.axhline(y=1.0, color="r", linestyle="--")
         plt.tight_layout()
-        plt.savefig(self.save_dir / "action_type_analysis.png")
+        plt.savefig(self.save_dir / "response_length_analysis.png")
         plt.close()
 
-        # 4. Value Distribution by Topic
-        plt.figure(figsize=(15, 8))
-        value_topic_dist = (
-            results_df.groupby(["topic", "values"])["stance_changed"].mean().unstack()
-        )
-        sns.heatmap(value_topic_dist, annot=True, cmap="viridis", fmt=".2f")
-        plt.title("Value Distribution Across Topics")
-        plt.tight_layout()
-        plt.savefig(self.save_dir / "value_topic_distribution.png")
-        plt.close()
+        # Check if we have metadata columns for more detailed analysis
+        metadata_cols = [col for col in results_df.columns if col.startswith("metadata_")]
 
-        # 5. Framework Comparison
-        plt.figure(figsize=(12, 6))
-        framework_comparison = results_df.groupby("framework")[
-            ["stance_changed", "censored", "value_alignment"]
-        ].mean()
-        framework_comparison.plot(kind="bar")
-        plt.title("Framework Performance Comparison")
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        plt.savefig(self.save_dir / "framework_comparison.png")
-        plt.close()
+        if len(metadata_cols) > 0:
+            # Try to create more detailed visualizations based on available metadata
+            try:
+                if "metadata_topic" in results_df.columns:
+                    # Topic-based analysis
+                    plt.figure(figsize=(12, 8))
+                    topic_data = (
+                        results_df.groupby(["metadata_topic", "framework"])["similarity_score"]
+                        .mean()
+                        .reset_index()
+                    )
+                    sns.barplot(
+                        data=topic_data, x="metadata_topic", y="similarity_score", hue="framework"
+                    )
+                    plt.title("Framework Impact by Topic")
+                    plt.xticks(rotation=45)
+                    plt.tight_layout()
+                    plt.savefig(self.save_dir / "topic_analysis.png")
+                    plt.close()
 
-    def generate_analysis_report(self, results_df: pd.DataFrame, metrics: dict) -> str:
+                if "metadata_values" in results_df.columns:
+                    # Try to extract values for analysis
+                    # This is complex because values might be stored as a string representation of a list
+                    try:
+                        # Attempt to create a value-based visualization if possible
+                        plt.figure(figsize=(12, 8))
+                        plt.title("Value-Based Analysis")
+                        plt.text(
+                            0.5,
+                            0.5,
+                            "Value analysis requires preprocessing",
+                            ha="center",
+                            va="center",
+                            fontsize=12,
+                        )
+                        plt.tight_layout()
+                        plt.savefig(self.save_dir / "value_analysis_placeholder.png")
+                        plt.close()
+                    except Exception as e:
+                        print(f"Error creating value-based visualization: {e}")
+            except Exception as e:
+                print(f"Error creating metadata-based visualizations: {e}")
+
+    def generate_analysis_report(self, results_df: pd.DataFrame) -> str:
         """
-        Generate a detailed analysis report.
+        Generate a markdown report summarizing the analysis.
 
         Args:
             results_df: DataFrame containing experiment results
-            metrics: Dictionary of calculated metrics
 
         Returns:
-            Formatted report string
+            Markdown formatted report
         """
-        report = ["# Enhanced Analysis Report\n"]
+        if len(results_df) == 0:
+            return "# Analysis Report\n\nNo results to analyze."
 
-        # Overall Statistics
-        report.append("## Overall Statistics")
-        report.append(f"- Total scenarios analyzed: {len(results_df)}")
-        report.append(f"- Overall stance change rate: {results_df['stance_changed'].mean():.2%}")
-        report.append(f"- Overall censorship rate: {results_df['censored'].mean():.2%}\n")
+        # Calculate stance changes if not already present
+        if "stance_changed" not in results_df.columns:
+            results_df = self.calculate_stance_changes(results_df)
 
-        # Value-based Analysis
-        report.append("## Value-based Analysis")
-        for value, score in metrics["value_based_metrics"]["alignment_scores"].items():
-            report.append(f"- {value}: {score:.2f} alignment score")
-        report.append("")
+        # Basic statistics
+        total_scenarios = results_df["scenario_id"].nunique()
+        total_models = results_df["model"].nunique()
+        total_frameworks = results_df["framework"].nunique()
 
-        # Topic-based Analysis
-        report.append("## Topic-based Analysis")
-        for topic, stats in metrics["topic_based_metrics"]["fluctuation"].items():
-            report.append(f"### {topic}")
-            report.append(f"- Stance change rate: {stats:.2%}")
-            report.append(
-                f"- Censorship rate: {metrics['topic_based_metrics']['censorship'][topic]:.2%}"
-            )
-        report.append("")
+        # Framework effectiveness
+        framework_effectiveness = results_df.groupby("framework")["stance_changed"].mean()
 
-        # Framework Effectiveness
-        report.append("## Framework Effectiveness")
-        framework_stats = results_df.groupby("framework")["stance_changed"].mean()
-        for framework, effectiveness in framework_stats.items():
-            report.append(f"- {framework}: {effectiveness:.2%} effectiveness rate")
+        # Model performance
+        model_performance = results_df.groupby("model")["stance_changed"].mean()
 
-        return "\n".join(report)
+        # Censorship rates if available
+        censorship_section = ""
+        if "framework_censored" in results_df.columns:
+            censorship_rates = results_df.groupby(["model", "framework"])[
+                "framework_censored"
+            ].mean()
+            censorship_section = f"""
+## Censorship Analysis
+
+Censorship rates by model and framework:
+
+```
+{censorship_rates}
+```
+"""
+
+        # Generate the report
+        report = f"""# LLM Ethics Experiment Analysis Report
+
+## Overview
+
+- Total scenarios analyzed: {total_scenarios}
+- Models tested: {total_models}
+- Ethical frameworks applied: {total_frameworks}
+
+## Framework Effectiveness
+
+Percentage of responses where the framework changed the model's stance:
+
+```
+{framework_effectiveness}
+```
+
+## Model Performance
+
+Percentage of responses where the model's stance changed across frameworks:
+
+```
+{model_performance}
+```
+{censorship_section}
+
+## Visualizations
+
+Visualizations have been saved to the `{self.save_dir}` directory.
+
+"""
+        return report
