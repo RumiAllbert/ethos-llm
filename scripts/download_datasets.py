@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+# Add the project root to the Python path
+import fix_path  # noqa
 from datasets import load_dataset
 
 from src.data.dataset import DatasetLoader
@@ -79,11 +81,22 @@ def download_datasets(
         try:
             source = ds_config["source"]
             subset = ds_config.get("subset")
+            config_name = ds_config.get("config")  # Get dataset-specific config name
 
-            if subset:
+            if subset and config_name:
+                # Dataset with both subset and config name
+                logger.info(f"Loading {source} (subset: {subset}, config: {config_name})")
+                dataset = load_dataset(source, subset, name=config_name, trust_remote_code=True)
+            elif subset:
+                # Dataset with just subset
                 logger.info(f"Loading {source} (subset: {subset})")
                 dataset = load_dataset(source, subset, trust_remote_code=True)
+            elif config_name:
+                # Dataset with just config name
+                logger.info(f"Loading {source} (config: {config_name})")
+                dataset = load_dataset(source, config_name, trust_remote_code=True)
             else:
+                # Dataset with no subset or config
                 logger.info(f"Loading {source}")
                 dataset = load_dataset(source, trust_remote_code=True)
 

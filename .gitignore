@@ -4,7 +4,7 @@ __pycache__/
 *$py.class
 .cursorrules
 .cursor/*
-
+.results/*
 # C extensions
 *.so
 
@@ -174,3 +174,4 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+results/*

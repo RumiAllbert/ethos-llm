@@ -80,7 +80,7 @@ check_ollama
 
 # Check if required models are pulled
 print_header "Checking required models"
-MODELS=("llama3.2:8b" "deepseek-r1:8b")
+MODELS=("llama3.2" "deepseek-r1:8b")
 MODELS_TO_PULL=()
 
 for model in "${MODELS[@]}"; do
@@ -111,9 +111,20 @@ if [ ${#MODELS_TO_PULL[@]} -gt 0 ]; then
     fi
 fi
 
-# Install dependencies
+# Fix Python package structure issues
+print_header "Setting up environment"
+echo "Ensuring project can be imported as a Python package..."
+
+# Ensure we have an __init__.py in scripts directory for fix_path module
+if [ ! -f "scripts/__init__.py" ]; then
+    echo "Creating scripts/__init__.py"
+    echo '"""Scripts package for the LLM Ethics Experiment."""' > scripts/__init__.py
+fi
+
+# Install dependencies and project in development mode
 print_header "Installing dependencies"
-poetry install
+echo "Installing project in development mode..."
+poetry install -v --no-root
 
 # Check for checkpoint
 CHECKPOINT_FILE="$OUTPUT_DIR/checkpoint.json"

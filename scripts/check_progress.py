@@ -11,6 +11,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# Add the project root to the Python path
+import fix_path  # noqa
+
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments.

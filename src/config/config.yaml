@@ -2,7 +2,7 @@
 
 # Models to use
 models:
-  - name: llama3.2:8b
+  - name: llama3.2:latest
     display_name: "Llama 3.2 (8B)"
   - name: deepseek-r1:8b
     display_name: "DeepSeek-Reasoner-1 (8B)"
@@ -23,12 +23,15 @@ datasets:
   ethics_suite:
     source: "hendrycks/ethics"
     subset: "commonsense"
-    max_samples: 100 # Limit samples for development
-    scenario_field: "text"
+    max_samples: 10 # Limit samples for development
+    scenario_field: "input" # Updated from "text" to match actual field in dataset
+    label_field: "label"
   moral_stories:
     source: "demelin/moral_stories"
-    max_samples: 100 # Limit samples for development
+    config: "full" # Specify config to use from the available options
+    max_samples: 10 # Limit samples for development
     scenario_field: "situation"
+    label_field: "moral_action_judgment"
 
 # Experiment settings
 experiment:
@@ -37,6 +40,7 @@ experiment:
   delay_between_calls: 1 # Delay in seconds between API calls
   save_dir: "results"
   random_seed: 42
+  run_id: "" # Will be populated at runtime
 
 # Censorship detection phrases
 censorship_phrases:

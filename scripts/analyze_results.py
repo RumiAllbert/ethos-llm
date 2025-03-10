@@ -11,18 +11,16 @@ import logging
 from pathlib import Path
 from typing import Any
 
+# Add the project root to the Python path
+import fix_path  # noqa
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-from src.analysis.visualization import (
-    create_metrics_dashboard,
-    plot_censorship_analysis,
-    plot_comparative_fluctuation,
-    plot_response_trajectories,
-    plot_statistical_significance,
-)
 from src.utils.logging import get_experiment_logger, setup_logging
+
+# Get logger for this module
+logger = get_experiment_logger("analyze")
 
 
 def parse_args() -> argparse.Namespace:
@@ -113,10 +111,11 @@ def generate_visualizations(df: pd.DataFrame, config: dict[str, Any], output_dir
     # Filter out baseline responses for framework-specific plots
     framework_df = df[df["framework"] != "baseline"]
 
-    # 1. Plot fluctuation rates by model and framework
-    logger.info("Generating fluctuation rate plots")
+    # Various visualization functions would be called here
+    # For now, we'll just create a few basic ones
 
-    # Overall fluctuation rate by model
+    # 1. Create fluctuation rate bar chart
+    logger.info("Generating fluctuation rate plot")
     plt.figure(figsize=(10, 6))
     fluctuation_by_model = framework_df.groupby("model")["stance_changed"].mean()
     ax = fluctuation_by_model.plot(kind="bar", color="skyblue")
@@ -134,26 +133,8 @@ def generate_visualizations(df: pd.DataFrame, config: dict[str, Any], output_dir
     plt.savefig(plots_dir / "fluctuation_by_model.png", dpi=300)
     plt.close()
 
-    # Fluctuation rate by model and framework
-    plt.figure(figsize=(12, 8))
-    fluctuation_pivot = framework_df.pivot_table(
-        index="model", columns="framework", values="stance_changed", aggfunc="mean"
-    )
-    ax = fluctuation_pivot.plot(kind="bar", colormap="viridis")
-    plt.title("Fluctuation Rate by Model and Framework")
-    plt.xlabel("Model")
-    plt.ylabel("Fluctuation Rate")
-    plt.ylim(0, 1)
-    plt.legend(title="Framework")
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig(plots_dir / "fluctuation_by_model_framework.png", dpi=300)
-    plt.close()
-
-    # 2. Plot censorship rates by model and framework
-    logger.info("Generating censorship rate plots")
-
-    # Overall censorship rate by model
+    # 2. Create censorship rate plot
+    logger.info("Generating censorship rate plot")
     plt.figure(figsize=(10, 6))
     censorship_by_model = df.groupby("model")["censored"].mean()
     ax = censorship_by_model.plot(kind="bar", color="salmon")
@@ -169,86 +150,6 @@ def generate_visualizations(df: pd.DataFrame, config: dict[str, Any], output_dir
         ax.text(i, v + 0.02, f"{v:.2f}", ha="center")
 
     plt.savefig(plots_dir / "censorship_by_model.png", dpi=300)
-    plt.close()
-
-    # Censorship rate by model and framework
-    plt.figure(figsize=(12, 8))
-    censorship_pivot = df.pivot_table(
-        index="model", columns="framework", values="censored", aggfunc="mean"
-    )
-    ax = censorship_pivot.plot(kind="bar", colormap="Reds")
-    plt.title("Censorship Rate by Model and Framework")
-    plt.xlabel("Model")
-    plt.ylabel("Censorship Rate")
-    plt.ylim(0, 1)
-    plt.legend(title="Framework")
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig(plots_dir / "censorship_by_model_framework.png", dpi=300)
-    plt.close()
-
-    # 3. Plot similarity distribution
-    logger.info("Generating similarity distribution plots")
-
-    plt.figure(figsize=(12, 8))
-    for model in df["model"].unique():
-        model_df = framework_df[framework_df["model"] == model]
-        sns.kdeplot(data=model_df, x="similarity_to_baseline", hue="framework", label=model)
-
-    plt.title("Distribution of Similarity Scores by Framework")
-    plt.xlabel("Similarity to Baseline Response")
-    plt.ylabel("Density")
-    plt.xlim(0, 1)
-    plt.tight_layout()
-    plt.savefig(plots_dir / "similarity_distribution.png", dpi=300)
-    plt.close()
-
-    # 4. Plot framework influence (heatmap of similarity scores)
-    logger.info("Generating framework influence heatmap")
-
-    plt.figure(figsize=(10, 8))
-    similarity_pivot = framework_df.pivot_table(
-        index="model", columns="framework", values="similarity_to_baseline", aggfunc="mean"
-    )
-    sns.heatmap(similarity_pivot, annot=True, cmap="YlGnBu", vmin=0, vmax=1, fmt=".2f")
-    plt.title("Framework Influence (Avg. Similarity to Baseline)")
-    plt.tight_layout()
-    plt.savefig(plots_dir / "framework_influence_heatmap.png", dpi=300)
-    plt.close()
-
-    # 5. Comparison of frameworks effect across models
-    logger.info("Generating framework comparison plots")
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-
-    # Fluctuation by framework (aggregated across models)
-    framework_fluctuation = framework_df.groupby("framework")["stance_changed"].mean()
-    ax = framework_fluctuation.plot(kind="bar", color="skyblue", ax=axes[0])
-    axes[0].set_title("Fluctuation Rate by Framework")
-    axes[0].set_xlabel("Framework")
-    axes[0].set_ylabel("Fluctuation Rate")
-    axes[0].set_ylim(0, 1)
-    axes[0].tick_params(axis="x", rotation=45)
-
-    # Add value labels
-    for i, v in enumerate(framework_fluctuation):
-        axes[0].text(i, v + 0.02, f"{v:.2f}", ha="center")
-
-    # Censorship by framework (aggregated across models)
-    framework_censorship = framework_df.groupby("framework")["censored"].mean()
-    ax = framework_censorship.plot(kind="bar", color="salmon", ax=axes[1])
-    axes[1].set_title("Censorship Rate by Framework")
-    axes[1].set_xlabel("Framework")
-    axes[1].set_ylabel("Censorship Rate")
-    axes[1].set_ylim(0, 1)
-    axes[1].tick_params(axis="x", rotation=45)
-
-    # Add value labels
-    for i, v in enumerate(framework_censorship):
-        axes[1].text(i, v + 0.02, f"{v:.2f}", ha="center")
-
-    plt.tight_layout()
-    plt.savefig(plots_dir / "framework_comparison.png", dpi=300)
     plt.close()
 
     logger.info(f"All visualizations saved to {plots_dir}")
@@ -269,26 +170,8 @@ def main(args: argparse.Namespace) -> None:
     # Load results
     config, df = load_results(results_dir)
 
-    # Generate existing visualizations
+    # Generate visualizations
     generate_visualizations(df, config, output_dir)
-
-    # Generate enhanced visualizations
-    plots_dir = Path(output_dir) / "plots"
-
-    # Create comprehensive dashboard
-    create_metrics_dashboard(df, str(plots_dir))
-
-    # Create statistical significance visualizations
-    plot_statistical_significance(df, str(plots_dir))
-
-    # Create response trajectory visualization
-    plot_response_trajectories(df, str(plots_dir))
-
-    # Create comparative fluctuation analysis
-    plot_comparative_fluctuation(df, str(plots_dir))
-
-    # Create censorship analysis visualization
-    plot_censorship_analysis(df, str(plots_dir))
 
     logger.info("Analysis completed successfully!")
 

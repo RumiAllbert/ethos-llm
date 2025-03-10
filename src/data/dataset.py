@@ -104,12 +104,16 @@ class DatasetLoader:
         dataset_config = self.config["datasets"]["moral_stories"]
         source = dataset_config["source"]
         field = dataset_config.get("scenario_field", "situation")
+        config_name = dataset_config.get(
+            "config", "full"
+        )  # Get the config name or default to "full"
 
-        logger.info(f"Loading Moral Stories dataset from {source}")
+        logger.info(f"Loading Moral Stories dataset from {source} (config: {config_name})")
 
         # Load dataset from Hugging Face
         try:
-            dataset = load_dataset(source)
+            # Pass the config name to load_dataset
+            dataset = load_dataset(source, config_name, trust_remote_code=True)
 
             # Get the test split if available, otherwise use train
             split = "test" if "test" in dataset else "train"
