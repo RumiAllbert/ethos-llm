@@ -8,37 +8,112 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 cd "$SCRIPT_DIR"
 
 # Default values
-RESUME=false
 PARALLEL=1
-MAX_SAMPLES=""
 OUTPUT_DIR="results"
+MAX_SAMPLES=""
+MODELS=""
+FRAMEWORKS=""
+DATASETS=""
+RESUME=false
+DEBUG=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
-  case $1 in
-    --resume)
-      RESUME=true
-      shift
-      ;;
-    --parallel)
-      PARALLEL="$2"
-      shift 2
-      ;;
-    --max-samples|-n)
-      MAX_SAMPLES="$2"
-      shift 2
-      ;;
-    --output-dir|-o)
-      OUTPUT_DIR="$2"
-      shift 2
-      ;;
-    *)
-      echo "Unknown option: $1"
-      echo "Usage: $0 [--resume] [--parallel N] [--max-samples N] [--output-dir DIR]"
-      exit 1
-      ;;
-  esac
+    case $1 in
+        --parallel)
+            PARALLEL="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --max-samples)
+            MAX_SAMPLES="$2"
+            shift 2
+            ;;
+        --models)
+            MODELS="$2"
+            shift 2
+            ;;
+        --frameworks)
+            FRAMEWORKS="$2"
+            shift 2
+            ;;
+        --datasets)
+            DATASETS="$2"
+            shift 2
+            ;;
+        --resume)
+            RESUME=true
+            shift
+            ;;
+        --debug)
+            DEBUG=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
 done
+
+# Build the command with only provided arguments
+CMD="python scripts/run_experiment.py"
+
+if [ ! -z "$PARALLEL" ]; then
+    CMD="$CMD --parallel $PARALLEL"
+fi
+
+if [ ! -z "$OUTPUT_DIR" ]; then
+    CMD="$CMD --output-dir $OUTPUT_DIR"
+fi
+
+if [ ! -z "$MAX_SAMPLES" ]; then
+    CMD="$CMD --max-samples $MAX_SAMPLES"
+fi
+
+if [ ! -z "$MODELS" ]; then
+    CMD="$CMD --models $MODELS"
+fi
+
+if [ ! -z "$FRAMEWORKS" ]; then
+    CMD="$CMD --frameworks $FRAMEWORKS"
+fi
+
+if [ ! -z "$DATASETS" ]; then
+    CMD="$CMD --datasets $DATASETS"
+fi
+
+if [ "$RESUME" = true ]; then
+    CMD="$CMD --resume"
+fi
+
+if [ "$DEBUG" = true ]; then
+    CMD="$CMD --debug"
+fi
+
+# Print the command that will be executed
+echo "This may take a long time depending on the number of scenarios and models."
+echo "Options:"
+echo "  - Resume from checkpoint: $RESUME"
+echo "  - Parallel workers: $PARALLEL"
+echo "  - Output directory: $OUTPUT_DIR"
+if [ ! -z "$MAX_SAMPLES" ]; then
+    echo "  - Max samples per dataset: $MAX_SAMPLES"
+fi
+
+# Ask for confirmation
+read -p "Proceed with experiment? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo "Executing: $CMD"
+    $CMD
+else
+    echo "Experiment cancelled."
+    exit 1
+fi
 
 # Create necessary directories
 mkdir -p data "$OUTPUT_DIR"
@@ -149,31 +224,6 @@ if [ -n "$MAX_SAMPLES" ]; then
 fi
 echo "Executing: $CMD"
 eval "$CMD"
-
-# Run experiment
-print_header "Running experiment"
-echo "This may take a long time depending on the number of scenarios and models."
-echo "Options:"
-echo "  - Resume from checkpoint: $RESUME"
-echo "  - Parallel workers: $PARALLEL"
-if [ -n "$MAX_SAMPLES" ]; then
-    echo "  - Max samples per dataset: $MAX_SAMPLES"
-fi
-echo "  - Output directory: $OUTPUT_DIR"
-
-read -p "Proceed with experiment? (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    CMD="poetry run python scripts/run_experiment.py --output-dir $OUTPUT_DIR --parallel $PARALLEL $RESUME_FLAG"
-    if [ -n "$MAX_SAMPLES" ]; then
-        CMD="$CMD --max-samples $MAX_SAMPLES"
-    fi
-    echo "Executing: $CMD"
-    eval "$CMD"
-else
-    echo "Experiment skipped. Exiting."
-    exit 0
-fi
 
 # Analyze results
 print_header "Analyzing results"
