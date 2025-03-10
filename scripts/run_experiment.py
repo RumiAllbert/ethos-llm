@@ -8,22 +8,23 @@ experiment with the specified ethical frameworks.
 import argparse
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+import time
 from pathlib import Path
 from typing import Any
 
 # Add the project root to the Python path
 import fix_path  # noqa
+import ollama
 import pandas as pd
+import yaml
+from tqdm import tqdm
 
-from src.analysis.metrics import ResponseAnalyzer
-from src.data.dataset import DatasetLoader, ScenarioItem
+from src.analysis.dilemma_analyzer import DilemmaAnalyzer
+from src.data.dataset import ScenarioItem
+from src.data.dataset_handlers import DailyDilemmaDataset
 from src.models.ollama_client import OllamaClient
-from src.utils.config import load_config, setup_experiment_dirs
+from src.utils.config import load_config
 from src.utils.dashboard import (
-    create_progress_dashboard,
-    load_checkpoint,
     should_skip_combination,
     update_progress,
 )
@@ -82,7 +83,8 @@ def parse_args() -> argparse.Namespace:
         Parsed arguments namespace
     """
     parser = argparse.ArgumentParser(description="Run the LLM Ethics Experiment")
-    parser.add_argument("--config", "-c", type=str, help="Path to the configuration file")
+    parser.add_argument("--config", default="src/config/config.yaml", help="Path to config file")
+    parser.add_argument("--output-dir", "-o", default="results", help="Directory to save results")
     parser.add_argument(
         "--models", type=str, nargs="+", help="List of models to use (overrides config)"
     )
@@ -100,9 +102,6 @@ def parse_args() -> argparse.Namespace:
         "-n",
         type=int,
         help="Maximum number of samples to use from each dataset (overrides config)",
-    )
-    parser.add_argument(
-        "--output-dir", "-o", type=str, help="Directory to save results (overrides config)"
     )
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint if available")
     parser.add_argument(
@@ -159,412 +158,158 @@ def process_scenario_parallel(
         return None
 
 
-def run_experiment(
-    config: dict[str, Any], args: argparse.Namespace | None = None
-) -> dict[str, Any]:
-    """Run the full experiment pipeline.
+def load_config(config_path: str) -> dict[str, Any]:
+    """Load experiment configuration."""
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
+def query_model(model_name: str, messages: list[dict[str, str]], config: dict[str, Any]) -> str:
+    """Query the model with retry logic and timeout."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = ollama.chat(
+                model=model_name,
+                messages=messages,
+                options={"timeout": config["experiment"]["ollama_timeout"]},
+            )
+            return response["message"]["content"]
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logging.error(f"Failed to query {model_name} after {max_retries} attempts: {e}")
+                return f"Error: {str(e)}"
+            time.sleep(2**attempt)  # Exponential backoff
+    return "Error: Maximum retries exceeded"
+
+
+def run_experiment(config: dict[str, Any], args: argparse.Namespace) -> pd.DataFrame:
+    """
+    Run the enhanced LLM ethics experiment.
 
     Args:
-        config: Configuration dictionary
-        args: Optional command line arguments (overrides config settings)
+        config: Experiment configuration
+        args: Command line arguments
 
     Returns:
-        Dictionary with experiment results
+        DataFrame containing experiment results
     """
-    logger.info("Starting LLM Ethics Experiment")
-
-    # Check if config is an OmegaConf object and handle appropriately
-    try:
-        # Try to import OmegaConf - if available, use it for conversion
-        from omegaconf import OmegaConf
-
-        is_omegaconf = hasattr(config, "_is_missing") or hasattr(config, "_get_node")
-
-        if is_omegaconf:
-            # We're working with OmegaConf, use its methods to update
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            OmegaConf.update(config, "experiment.run_id", timestamp)
-
-            # Apply command line overrides first while we still have the OmegaConf object
-            if args:
-                if args.models:
-                    filtered_models = []
-                    for model in config.models:
-                        if model.name in args.models:
-                            filtered_models.append(model)
-                    config.models = filtered_models
-
-                if args.frameworks:
-                    filtered_frameworks = []
-                    for fw in config.frameworks:
-                        if fw.name in args.frameworks:
-                            filtered_frameworks.append(fw)
-                    config.frameworks = filtered_frameworks
-
-                if args.datasets and all(ds in config.datasets for ds in args.datasets):
-                    filtered_datasets = {}
-                    for k, v in config.datasets.items():
-                        if k in args.datasets:
-                            filtered_datasets[k] = v
-                    config.datasets = filtered_datasets
-
-                if args.max_samples:
-                    for ds_key in config.datasets:
-                        OmegaConf.update(config, f"datasets.{ds_key}.max_samples", args.max_samples)
-
-                if args.output_dir:
-                    OmegaConf.update(config, "experiment.save_dir", args.output_dir)
-
-            # Now convert to a regular Python dictionary using our deep converter
-            config_dict = deep_convert_config(config)
-        else:
-            # It's a regular dict, we can modify it directly
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            config["experiment"]["run_id"] = timestamp
-            config_dict = config
-
-            # Apply command line overrides
-            if args:
-                if args.models:
-                    config_dict["models"] = [
-                        model for model in config_dict["models"] if model["name"] in args.models
-                    ]
-
-                if args.frameworks:
-                    config_dict["frameworks"] = [
-                        fw for fw in config_dict["frameworks"] if fw["name"] in args.frameworks
-                    ]
-
-                if args.datasets and all(ds in config_dict["datasets"] for ds in args.datasets):
-                    config_dict["datasets"] = {
-                        k: v for k, v in config_dict["datasets"].items() if k in args.datasets
-                    }
-
-                if args.max_samples:
-                    for ds in config_dict["datasets"].values():
-                        ds["max_samples"] = args.max_samples
-
-                if args.output_dir:
-                    config_dict["experiment"]["save_dir"] = args.output_dir
-
-    except ImportError:
-        # OmegaConf isn't available, assume it's a regular dict
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        config["experiment"]["run_id"] = timestamp
-        config_dict = config
-
-        # Apply command line overrides
-        if args:
-            if args.models:
-                config_dict["models"] = [
-                    model for model in config_dict["models"] if model["name"] in args.models
-                ]
-
-            if args.frameworks:
-                config_dict["frameworks"] = [
-                    fw for fw in config_dict["frameworks"] if fw["name"] in args.frameworks
-                ]
-
-            if args.datasets and all(ds in config_dict["datasets"] for ds in args.datasets):
-                config_dict["datasets"] = {
-                    k: v for k, v in config_dict["datasets"].items() if k in args.datasets
-                }
-
-            if args.max_samples:
-                for ds in config_dict["datasets"].values():
-                    ds["max_samples"] = args.max_samples
-
-            if args.output_dir:
-                config_dict["experiment"]["save_dir"] = args.output_dir
-
-    # Setup experiment directories
-    save_dir = Path(config_dict["experiment"]["save_dir"])
-    setup_experiment_dirs(config_dict)
-
-    # Save the configuration
-    config_path = save_dir / "config.json"
-    try:
-        with open(config_path, "w") as f:
-            json.dump(config_dict, f, indent=2)
-        logger.info(f"Saved configuration to {config_path}")
-    except Exception as e:
-        # If there's still a serialization error, try another approach
-        logger.warning(f"Error saving config as JSON: {e}")
-        # Convert to a simplified dictionary that is definitely JSON serializable
-        simple_config = json.loads(json.dumps(config_dict, default=lambda o: str(o)))
-        simple_config_path = save_dir / "config_simplified.json"
-        with open(simple_config_path, "w") as f:
-            json.dump(simple_config, f, indent=2)
-        logger.warning(f"Saved simplified configuration to {simple_config_path}")
-
-    # Load datasets
-    logger.info("Loading datasets")
-
-    # Add dataset configurations for problematic datasets
-    if "moral_stories" in config_dict["datasets"]:
-        config_dict["datasets"]["moral_stories"]["config"] = "full"
-        logger.info("Added 'full' config to moral_stories dataset")
-
-    try:
-        dataset_loader = DatasetLoader(config_dict)
-        datasets = dataset_loader.load_all_datasets()
-
-        # Log dataset statistics
-        total_scenarios = sum(len(scenarios) for scenarios in datasets.values())
-        logger.info(f"Loaded {total_scenarios} total scenarios across {len(datasets)} datasets")
-        for name, scenarios in datasets.items():
-            logger.info(f"  {name}: {len(scenarios)} scenarios")
-    except Exception as e:
-        logger.error(f"Error loading datasets: {e}")
-        logger.warning("Continuing with an empty dataset")
-        datasets = {}
-        total_scenarios = 0
-
-    # Initialize Ollama client
-    logger.info("Initializing Ollama client")
-    client = OllamaClient(config_dict)
-
-    # Initialize response analyzer
-    logger.info("Initializing response analyzer")
-    analyzer = ResponseAnalyzer(config_dict)
-
-    # Get list of models and frameworks to test
-    models = [model["name"] for model in config_dict["models"]]
-    frameworks = [fw["name"] for fw in config_dict["frameworks"]]
-
-    logger.info(f"Testing models: {', '.join(models)}")
-    logger.info(f"Testing frameworks: {', '.join(frameworks)}")
-
-    # Process scenarios
-    try:
-        all_scenarios = dataset_loader.get_all_scenarios()
-    except Exception as e:
-        logger.error(f"Error getting scenarios: {e}")
-        all_scenarios = []
-
-    # Check for checkpoint if resuming
-    completed_combinations = set()
-    if args and args.resume:
-        completed_combinations, has_checkpoint = load_checkpoint(save_dir)
-        if has_checkpoint:
-            logger.info(
-                f"Resuming experiment with {len(completed_combinations)} already processed combinations"
-            )
-        else:
-            logger.info("No checkpoint found. Starting fresh experiment.")
-
-    # Create progress dashboard
-    dashboard = create_progress_dashboard(
-        total_scenarios=len(all_scenarios), models=models, frameworks=frameworks, save_dir=save_dir
-    )
-
-    # Update dashboard with completed combinations from checkpoint
-    if completed_combinations:
-        dashboard["completed_combinations"] = list(completed_combinations)
-        dashboard["completed"] = len(completed_combinations)
-
-        # Update models progress
-        for combo in completed_combinations:
-            if "_" in combo:
-                _, model = combo.split("_", 1)
-                if model in dashboard["models_progress"]:
-                    dashboard["models_progress"][model] += 1
-
-    # Start processing
     results = []
-    logger.info(
-        f"Processing {len(all_scenarios)} scenarios with {len(models)} models and {len(frameworks)} frameworks"
-    )
 
-    # Check if we actually have scenarios to process
-    if not all_scenarios:
-        logger.warning("No scenarios to process. Check dataset configuration.")
-        # Create a placeholder result to avoid breaking the analysis
-        placeholder_result = {
-            "scenario_id": "placeholder",
-            "scenario_text": "This is a placeholder because no scenarios were loaded.",
-            "model": models[0] if models else "placeholder_model",
-            "frameworks": frameworks,
-            "responses": {
-                fw: {"text": f"Placeholder response for {fw} framework."} for fw in frameworks
-            },
-        }
-        results.append(placeholder_result)
+    # Initialize dataset handler
+    dataset_handler = DailyDilemmaDataset(config)
+    scenarios, metadata_list = dataset_handler.process_dataset()
 
-        # Save the placeholder to disk
-        placeholder_path = save_dir / "raw_responses" / "placeholder.json"
-        with open(placeholder_path, "w") as f:
-            json.dump(placeholder_result, f, indent=2)
-    else:
-        # Determine parallel execution mode
-        num_workers = 1
-        if args and args.parallel and args.parallel > 1:
-            num_workers = min(args.parallel, 8)  # Cap at 8 to avoid overwhelming the system
-            logger.info(f"Using {num_workers} parallel workers for processing")
+    # Initialize analyzer
+    analyzer = DilemmaAnalyzer(save_dir=Path(args.output_dir) / "plots")
 
-        if num_workers > 1:
-            # Parallel execution
-            with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                # Submit all tasks
-                futures = []
-                for scenario in all_scenarios:
-                    for model in models:
-                        # Skip already completed combinations
-                        if should_skip_combination(scenario.id, model, completed_combinations):
-                            logger.debug(
-                                f"Skipping already processed scenario {scenario.id} with model {model}"
-                            )
-                            continue
+    # Process each scenario
+    for scenario, metadata in tqdm(
+        zip(scenarios, metadata_list, strict=False), total=len(scenarios)
+    ):
+        for model in config["models"]:
+            model_name = model["name"]
 
-                        futures.append(
-                            executor.submit(
-                                process_scenario_parallel,
-                                scenario,
-                                model,
-                                frameworks,
-                                client,
-                                save_dir,
-                                completed_combinations,
-                                dashboard,
-                            )
-                        )
+            # Get baseline response
+            baseline_messages = [
+                {
+                    "role": "user",
+                    "content": f"Consider the following ethical scenario and provide your reasoning and recommendation:\n\n{scenario}",
+                }
+            ]
+            baseline_response = query_model(model_name, baseline_messages, config)
 
-                # Process results as they complete
-                for future in futures:
-                    try:
-                        result = future.result()
-                        if result:
-                            results.append(result)
-                    except Exception as e:
-                        logger.error(f"Error in parallel execution: {e}")
-        else:
-            # Sequential execution
-            scenario_count = 0
-            for scenario in all_scenarios:
-                scenario_count += 1
-                logger.info(
-                    f"Processing scenario {scenario_count}/{len(all_scenarios)}: {scenario.id}"
+            # Process each framework
+            for framework in config["frameworks"]:
+                # Get framework response
+                framework_messages = baseline_messages + [
+                    {"role": "assistant", "content": baseline_response},
+                    {"role": "user", "content": framework["prompt"]},
+                ]
+                framework_response = query_model(model_name, framework_messages, config)
+
+                # Calculate metrics
+                value_alignment = analyzer.analyze_value_alignment(
+                    framework_response, metadata["values"]
                 )
 
-                # Process each model
-                for model in models:
-                    # Skip if already processed
-                    if should_skip_combination(scenario.id, model, completed_combinations):
-                        logger.info(
-                            f"Skipping already processed scenario {scenario.id} with model {model}"
-                        )
-                        continue
+                # Store results
+                result = {
+                    "model": model_name,
+                    "framework": framework["name"],
+                    "scenario": scenario,
+                    "baseline_response": baseline_response,
+                    "framework_response": framework_response,
+                    "value_alignment": sum(value_alignment.values()) / len(value_alignment)
+                    if value_alignment
+                    else 0,
+                    "censored": any(
+                        phrase in framework_response.lower()
+                        for phrase in config["censorship_phrases"]
+                    ),
+                    "stance_changed": True,  # Will be updated in post-processing
+                    **metadata,  # Include all metadata
+                }
+                results.append(result)
 
-                    logger.info(f"  Using model: {model}")
+                # Add delay between calls
+                time.sleep(config["experiment"]["delay_between_calls"])
 
-                    # Process scenario with all frameworks
-                    try:
-                        result = client.process_scenario(scenario, model, frameworks)
-                        results.append(result)
+    # Convert to DataFrame
+    results_df = pd.DataFrame(results)
 
-                        # Save raw response data
-                        response_path = save_dir / "raw_responses" / f"{scenario.id}_{model}.json"
-                        with open(response_path, "w") as f:
-                            json.dump(result, f, indent=2)
+    # Calculate stance changes using similarity
+    for idx, row in results_df.iterrows():
+        baseline_embedding = analyzer.get_text_embedding(str(row["baseline_response"]))
+        framework_embedding = analyzer.get_text_embedding(str(row["framework_response"]))
+        similarity = float(cosine_similarity([baseline_embedding], [framework_embedding])[0][0])
+        results_df.at[idx, "stance_changed"] = (
+            similarity < config["experiment"]["similarity_threshold"]
+        )
 
-                        # Update progress dashboard
-                        update_progress(dashboard, scenario.id, model, save_dir)
-
-                    except Exception as e:
-                        logger.error(
-                            f"Error processing scenario {scenario.id} with model {model}: {e}"
-                        )
-
-    logger.info(f"Completed processing {len(results)} scenario-model combinations")
-
-    # Handle case where we only processed part of the data due to resuming
-    # We need to load any already processed results that weren't re-processed
-    if completed_combinations:
-        logger.info("Loading previously processed results from files")
-        for combination in completed_combinations:
-            if "_" in combination:
-                scenario_id, model = combination.split("_", 1)
-
-                # Skip if we already have this result in memory
-                if any(
-                    r.get("scenario_id") == scenario_id and r.get("model") == model for r in results
-                ):
-                    continue
-
-                # Load from file
-                response_path = save_dir / "raw_responses" / f"{scenario_id}_{model}.json"
-                if response_path.exists():
-                    try:
-                        with open(response_path) as f:
-                            result = json.load(f)
-                        results.append(result)
-                        logger.debug(f"Loaded previous result for {scenario_id} with {model}")
-                    except Exception as e:
-                        logger.error(
-                            f"Error loading previous result for {scenario_id} with {model}: {e}"
-                        )
-
-    # Analyze results
-    logger.info("Analyzing results")
-    try:
-        analysis = analyzer.analyze_results(results)
-
-        # Save analysis
-        analysis_dir = save_dir / "analysis"
-
-        # Save full analysis to JSON (convert DataFrame to records)
-        analysis_copy = analysis.copy()
-
-        # Convert DataFrame to records if it exists
-        if "dataframe" in analysis and isinstance(analysis["dataframe"], pd.DataFrame):
-            analysis_copy["dataframe"] = analysis["dataframe"].to_dict(orient="records")
-
-        with open(analysis_dir / "analysis.json", "w") as f:
-            json.dump(analysis_copy, f, indent=2)
-
-        # Save DataFrame to CSV if it exists
-        if "dataframe" in analysis and isinstance(analysis["dataframe"], pd.DataFrame):
-            analysis["dataframe"].to_csv(analysis_dir / "responses.csv", index=False)
-
-        # Generate and save summary
-        summary = analyzer.generate_summary(analysis)
-        with open(analysis_dir / "summary.md", "w") as f:
-            f.write(summary)
-
-        logger.info(f"Saved analysis to {analysis_dir}")
-
-        # Print summary to console
-        print("\n" + "=" * 80)
-        print("EXPERIMENT SUMMARY")
-        print("=" * 80)
-        print(summary)
-        print("=" * 80)
-
-    except Exception as e:
-        logger.error(f"Error analyzing results: {e}")
-        summary = f"Error analyzing results: {e}"
-
-    logger.info("Experiment completed successfully!")
-
-    return {
-        "config": config_dict,
-        "results": results,
-        "analysis": analysis
-        if "analysis" in locals()
-        else {"error": str(e) if "e" in locals() else "Unknown error"},
-    }
+    return results_df
 
 
-if __name__ == "__main__":
-    # Parse command line arguments
+def main():
+    """Main function to run the experiment."""
     args = parse_args()
 
-    # Set up logging
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    setup_logging(log_level=log_level)
+    # Setup logging
+    setup_logging()
 
     # Load configuration
     config = load_config(args.config)
 
+    # Update config with command line arguments
+    if args.max_samples:
+        for dataset in config["datasets"].values():
+            dataset["max_samples"] = args.max_samples
+
+    # Create results directory
+    results_dir = Path(args.output_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     # Run experiment
-    run_experiment(config, args)
+    logging.info("Starting experiment with enhanced analysis")
+    results_df = run_experiment(config, args)
+
+    # Save raw results
+    results_df.to_csv(results_dir / "enhanced_results.csv", index=False)
+
+    # Initialize analyzer and calculate metrics
+    analyzer = DilemmaAnalyzer(save_dir=results_dir / "plots")
+    metrics = analyzer.calculate_enhanced_metrics(results_df)
+
+    # Generate visualizations
+    analyzer.create_enhanced_visualizations(results_df)
+
+    # Generate and save report
+    report = analyzer.generate_analysis_report(results_df, metrics)
+    with open(results_dir / "enhanced_analysis_report.md", "w") as f:
+        f.write(report)
+
+    logging.info("Experiment completed successfully!")
+
+
+if __name__ == "__main__":
+    main()
